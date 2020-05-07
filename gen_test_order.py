@@ -3,7 +3,7 @@ import ast
 import glob
 from collections import defaultdict
 from os import path
-from collections import deque
+from itertools import takewhile
 #from snakefood3.graph import graph
 
 cached_exists_files = {}
@@ -24,9 +24,8 @@ def parse_file(filename) -> ast.AST:
 
 
 def iter_py_files(dir_name):
-    # f0 = glob.glob(path.join(dir_name, '**', '*.py'))
-    # f1 = glob.glob(path.join(dir_name, '*.py'))
-    # f2 = glob.glob(path.join(dir_name, '**', '*.py'), recursive=True)
+    # snakefood3 originally had the following. Not sure why, as it doesn't find (and therefore analyze)
+    # all submodules/files.
     # files =  glob.glob(path.join(dir_name, '**', '*.py')) +\
     #        glob.glob(path.join(dir_name, '*.py'))
     files = glob.glob(path.join(dir_name, '**', '*.py'), recursive=True)
@@ -96,56 +95,87 @@ def module_to_filename(module: str, python_path):
 import argparse
 import os
 
-# TODO - remove
-def break_cycles1(work):
-    keys = work.keys()
-    for s in keys:
-        d = work[s]
-        # break 'obvious' cycles
-        for s1 in d:
-            d1 = work[s1]
-            if s in d1:
-                if len(d) <= len(d1):
-                    nd = d - set([s1])
-                    work[s] = nd
-                else:
-                    nd = d1 - set([s])
-                    work[s1] = nd
-    return work
 
+# Computing ranking (O) for modules based on the number of 'internal' 
+# dependencies each module has: the fewer dependencies the 'higher' the rank.
+# Given a set of modules to rank (T) and a set of modules ranked so far (S)
+# For each module m in T compute the number N of its dependencies not yet ranked i.e.
+# N = len(imports[m] - S)
+# The next rank consists of the set of m with lowest N (R)
+# If N == 0 // trivial case
+#   remove R from T and add to S
+#   append R to O
+# Otherwise // There is a cycle/s in the graph induced by current T
+#   rank R to produce M 
+#   - We want the next rank (M) to consist of the set of m in R depended on by the
+#   - most n in R .
+#   - Rationale: Adding tests for M will:
+#   - 1). Adding and running tests for M early in the overall testsuite will expose  
+#         and identify 'underlying' problems more clearly.
+#   - 2). Adding tests for M will help prevent impactful regressions/ give bigger
+#         increase in overall reliability (i.e. regressions here will (statically)
+#         affect more parts of the 'system'
+#   remove M from T and add to S
+#   append M to O
+# Repeat until T is empty.
+def compute_rankings(imports):
 
-def break_cycles(work):
-    def keyfn (t):
-        (s, d) = t
-        return len(d)
-    items = sorted(work.items(), key=keyfn)
-    for s, d in items:
-        seen = {s}
-        todo = deque(d)
-        while todo:
-            s1 = todo.popleft()
-            d1 = work[s1]
-            nd = d1 - seen
-            work[s1] = nd
-            seen.add(s1)
-            todo.extendleft(nd)
-    return work
+    def rank_todo(todo, seen):
 
+        def size_deps_not_seen(m, seen):
+            return len(imports[m] - seen)
 
-def compute_dag_order(imports):
-    order = []
-    work = dict(imports)
-    work = break_cycles(work)
-    while work.items():
-        next_set = {s for s, d in work.items() if 0 == len(d) }
-        if len(next_set) == 0:
-            print("foo")
-        order.append(next_set)
-        for k in next_set:
-            work.pop(k)
-        for s , d in work.items():
-            work[s] = d - next_set
-    return order
+        def get_n(i):
+            (s, n) = i
+            return n
+
+        return sorted ([(m, size_deps_not_seen(m, seen)) for m in todo], key=get_n)
+
+    def get_next_rank(ranked_todos):
+        # ranked_todos os sorted by (_, N)
+        (s, lowest_n) = ranked_todos[0]
+
+        def eq_lowest_n(i):
+            (s, n) = i
+            return lowest_n == n
+
+        return lowest_n, {s for s, _n in set(takewhile(eq_lowest_n, ranked_todos))}
+
+    def rank_rank(rank):
+
+        def get_n(i):
+            (s, n) = i
+            return n
+
+        rankings = []
+        for s in rank:
+            n = 0
+            for s1 in rank:
+                if s in imports[s1]:
+                    n = n + 1
+            rankings.append((s, n))
+        # N.B. reversed sort i.e. modules with most unseen dependencies appear first.
+        sorted_rankings = sorted(rankings, key=get_n, reverse=True)
+        return sorted_rankings
+
+    rankings = []
+    seen = set()
+    todo = set(imports.keys())
+    while len(todo) > 0 :
+        ranked_todo = rank_todo(todo, seen)
+        (num_outstanding_deps, next_rank) = get_next_rank(ranked_todo)
+        if (num_outstanding_deps == 0) :
+            # easy case: just remove 'next_rank' from 'todo' and add to 'seen'
+            todo = todo - next_rank
+            seen = seen.union(next_rank)
+            rankings.append(next_rank)
+        else:
+            ranked_rank = rank_rank(next_rank)
+            (num_outstanding_deps, next_rank) = get_next_rank(ranked_rank)
+            todo = todo - next_rank
+            seen = seen.union(next_rank)
+            rankings.append(next_rank)
+    return rankings
 
 
 def main():
@@ -201,7 +231,7 @@ def main():
     #             if source != d:
     #                 formatted_imports[source].add(d)
     # print(graph(formatted_imports.items()))
-    order = compute_dag_order(imports)
+    rankings = compute_rankings(imports)
 
 
 main()
