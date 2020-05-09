@@ -1,10 +1,10 @@
-
 import ast
 import glob
 from collections import defaultdict
 from os import path
 from itertools import takewhile
-#from snakefood3.graph import graph
+
+# from snakefood3.graph import graph
 
 cached_exists_files = {}
 
@@ -32,10 +32,9 @@ def iter_py_files(dir_name):
     return files
 
 
-def get_all_imports_of_file(filename, python_path):
-    current_module = filename_to_module(filename, python_path)
-    if filename.endswith('__init__.py'):
-        current_module += '.__init__'
+def get_all_imports_of_file(filename, init, python_path):
+    if init:
+        current_module = init
     imports = set()
     for node in ast.walk(parse_file(filename)):
         if isinstance(node, ast.Import):
@@ -83,8 +82,8 @@ def filename_to_module(filepath, python_path):
     realpath = realpath.replace('/', '.')
     realpath = realpath.split('.py')[0]  # type: str
     if realpath.endswith('.__init__'):
-        realpath = realpath.split('.__init__')[0]
-    return realpath
+        return realpath.split('.__init__')[0], realpath
+    return realpath, None
 
 
 def module_to_filename(module: str, python_path):
@@ -96,7 +95,7 @@ import argparse
 import os
 
 
-# Computing ranking (O) for modules based on the number of 'internal' 
+# Computing ranking (O) for modules (files) based on the number of 'internal'
 # dependencies each module has: the fewer dependencies the 'higher' the rank.
 # Given a set of modules to rank (T) and a set of modules ranked so far (S)
 # For each module m in T compute the number N of its dependencies not yet ranked i.e.
@@ -118,8 +117,7 @@ import os
 #   remove M from T and add to S
 #   append M to O
 # Repeat until T is empty.
-def compute_rankings(imports):
-
+def compute_file_rankings(imports):
     def rank_todo(todo, seen):
 
         def size_deps_not_seen(m, seen):
@@ -129,7 +127,7 @@ def compute_rankings(imports):
             (s, n) = i
             return n
 
-        return sorted ([(m, size_deps_not_seen(m, seen)) for m in todo], key=get_n)
+        return sorted([(m, size_deps_not_seen(m, seen)) for m in todo], key=get_n)
 
     def get_next_rank(ranked_todos):
         # ranked_todos os sorted by (_, N)
@@ -161,10 +159,10 @@ def compute_rankings(imports):
     rankings = []
     seen = set()
     todo = set(imports.keys())
-    while len(todo) > 0 :
+    while len(todo) > 0:
         ranked_todo = rank_todo(todo, seen)
         (num_outstanding_deps, next_rank) = get_next_rank(ranked_todo)
-        if (num_outstanding_deps == 0) :
+        if (num_outstanding_deps == 0):
             # easy case: just remove 'next_rank' from 'todo' and add to 'seen'
             todo = todo - next_rank
             seen = seen.union(next_rank)
@@ -178,6 +176,48 @@ def compute_rankings(imports):
     return rankings
 
 
+class Module(object):
+    MODULES = defaultdict(set)
+
+    @staticmethod
+    def get_module(m_name):
+        if m_name in Module.MODULES:
+            return Module.MODULES[m_name]
+        else:
+            return Module(m_name)
+
+    @staticmethod
+    def get_modules():
+        return Module.MODULES
+
+    def __init__(self, m_name):
+        Module.MODULES[m_name] = self
+        self.name = m_name
+        self.files = set()
+        self.dependencies = set()
+        self.r_dependencies = set()
+
+    def add_file(self, file):
+        self.files.add(file)
+
+    def add_dependency(self, s, d):
+        self.add_file(s)
+        self.dependencies.add((s, d))
+
+    def add_r_dependency(self, d):
+        self.r_dependencies.add(d)
+
+    def add_r_dependencies(self, python_path):
+        for s, d_name in self.dependencies:
+            if d_name not in Module.MODULES:
+                d_name = d_name[:d_name.rindex('.')]
+            s_name, init = filename_to_module(s, python_path)
+            if s_name not in Module.MODULES:
+                s_name = s_name[:s_name.rindex('.')]
+            if s_name != d_name:
+                Module.MODULES[d_name].add_r_dependency(s)
+
+# invoke: python3 gen_test_order.py ./ manimlib
 def main():
     parser = argparse.ArgumentParser()
     # parser.add_argument('-i', '--internal', action='store_true')
@@ -198,40 +238,44 @@ def main():
     else:
         groups = []
 
-    def replace(node_name):
-        for m in groups:
-            if node_name.startswith(m):
-                return m
-
-        return node_name
+    def add_to_modules(file, module, init, imports):
+        if init:
+            m =Module.get_module(module)
+            for i in imports:
+                m.add_dependency(module, i)
+        else:
+            m_name = module[:module.rindex('.')]
+            m = Module.get_module(m_name)
+            if imports:
+                for i in imports:
+                    m.add_dependency(file, i)
+            else:
+                m.add_file(file)
 
     python_path = path.abspath(path.expanduser(r.project_path))
     internal_package = {
         x for x in os.listdir(python_path)
         if path.isdir(path.join(python_path, x))
-        and path.exists(path.join(python_path, x, '__init__.py'))
+           and path.exists(path.join(python_path, x, '__init__.py'))
     }
 
     imports = defaultdict(set)
-    for file in iter_py_files(path.join(python_path, r.package_name)):
-        file_imports = get_all_imports_of_file(
-            file,
-            python_path=python_path,
-        )
-        current_module = filename_to_module(file, python_path)
-        imports[replace(current_module)].update({
-            replace(x)
-            for x in file_imports
-            if [c for c in internal_package if x.startswith(c)]
-        })
-    # formatted_imports = defaultdict(set)
-    # for source, dist in imports.items():
-    #     if dist:
-    #         for d in dist:
-    #             if source != d:
-    #                 formatted_imports[source].add(d)
+
+    py_files = iter_py_files(path.join(python_path, r.package_name))
+    for file in py_files:
+        current_module, init = filename_to_module(file, python_path)
+
+        file_imports = get_all_imports_of_file(file, init, python_path=python_path)
+        internal_imports = {x for x in file_imports if [c for c in internal_package if x.startswith(c)]}
+        imports[current_module].update(internal_imports)
+        add_to_modules(file, current_module, init, internal_imports)
+
     # print(graph(formatted_imports.items()))
-    rankings = compute_rankings(imports)
+    modules = Module.get_modules()
+    for n, m in modules.items():
+        m.add_r_dependencies(python_path)
+
+    file_rankings = compute_file_rankings(imports)
 
 
 main()
