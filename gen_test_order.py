@@ -32,63 +32,6 @@ def iter_py_files(dir_name):
     return files
 
 
-def get_all_imports_of_file(filename, init, python_path):
-    if init:
-        current_module = init
-    imports = set()
-    for node in ast.walk(parse_file(filename)):
-        if isinstance(node, ast.Import):
-            for name in node.names:
-                # print(name.name)
-                imports.add(name.name)
-        elif isinstance(node, ast.ImportFrom):
-            # find which module is imported from
-            # from .a import b # module=='a',name=='b'
-            # maybe base_module.a.b or Base_module.a#b
-            # from .a.b import c # module=='a.b',name=='c'
-            # maybe base_module.a.b.c or Base_module.a.b#c
-            # module should be
-            added = set()
-            if node.level == 0:
-                module = node.module
-            else:
-                module = '.'.join(current_module.split('.')[:-node.level])
-                if node.module:
-                    module += '.' + node.module
-                else:
-                    # from . import b # module==None,name=='b'
-                    # maybe base_module.b or Base_module#b
-                    pass
-            for name in node.names:
-                maybe_dir = path.join(
-                    python_path,
-                    *module.split('.'),
-                    name.name,
-                )
-                maybe_file = module_to_filename(
-                    module + '.' + name.name, python_path
-                )
-                if file_exists(maybe_dir) or file_exists(maybe_file):
-                    added.add(module + '.' + name.name)
-                else:
-                    added.add(module)
-            imports.update(added)
-    return imports
-
-
-def filename_to_module(filepath, python_path):
-    realpath = path.relpath(filepath, python_path)
-    realpath = realpath.replace('\\', '.')
-    realpath = realpath.replace('/', '.')
-    realpath = realpath.split('.py')[0]  # type: str
-    if realpath.endswith('.__init__'):
-        return realpath.split('.__init__')[0], realpath
-    return realpath, None
-
-
-def module_to_filename(module: str, python_path):
-    module = module.replace('.', '/') + '.py'
-    return path.join(python_path, module)
 
 
 import argparse
@@ -175,99 +118,176 @@ def compute_file_rankings(imports):
             rankings.append(next_rank)
     return rankings
 
+class Module_Desc(object):
 
-class Module(object):
-    MODULES = defaultdict(set)
-    FILES = set()
-    IMPORTS = defaultdict(set)
+    def __init__(self, filepath, python_path):
+        self.abs_path = filepath
+        self.python_path = python_path
+        self.rel_path = path.relpath(filepath, python_path)
 
-    PYTHON_PATH = None
-    PACKAGE_NAME = None
-    INTERNAL_PACKAGE = None
-
-    @staticmethod
-    def init(project_path, package_name):
-        Module.PYTHON_PATH = path.abspath(path.expanduser(project_path))
-        Module.PACKAGE_NAME = package_name
-        Module.INTERNAL_PACKAGE = {
-            x for x in os.listdir(Module.PYTHON_PATH)
-            if path.isdir(path.join(Module.PYTHON_PATH, x))
-               and path.exists(path.join(Module.PYTHON_PATH, x, '__init__.py'))
-        }
-
-        python_path = Module.PYTHON_PATH
-        internal_package = Module.INTERNAL_PACKAGE
-        for file in iter_py_files(path.join(python_path, Module.PACKAGE_NAME)):
-            Module.FILES.add(path.relpath(file, python_path))
-            current_module, init = filename_to_module(file, python_path)
-
-            file_imports = get_all_imports_of_file(file, init, python_path=python_path)
-            internal_imports = {x for x in file_imports if [c for c in internal_package if x.startswith(c)]}
-            Module.IMPORTS[current_module].update(internal_imports)
-            Module.add_file_data(file, current_module, init, internal_imports)
-
-
-    @staticmethod
-    def finalize():
-        for n, m in Module.MODULES.items():
-            m.add_r_dependencies()
-        file_rankings = compute_file_rankings(Module.IMPORTS)
-
-    @staticmethod
-    def add_file_data(file, module, init, imports):
-        if init:
-            m =Module.get_module(module)
-            for i in imports:
-                m.add_dependency(module, i)
+        tpath = path.relpath(filepath, python_path)
+        tpath1 = tpath.replace('\\', '.')
+        tpath2 = tpath1.replace('/', '.')
+        tpath3 = tpath2.split('.py')[0]  # type: str
+        self.sub_module_name = tpath3
+        if tpath3.endswith('.__init__'):
+            self.module_name = tpath3.split('.__init__')[0]
+            self.init = True
         else:
-            m_name = module[:module.rindex('.')]
-            m = Module.get_module(m_name)
-            if imports:
-                for i in imports:
-                    m.add_dependency(file, i)
-            else:
-                m.add_file(file)
+            self.module_name = tpath3[:tpath3.rindex('.')]
+            self.init = False
 
+class Package(object):
 
-    @staticmethod
-    def get_module(m_name):
-        if m_name in Module.MODULES:
-            return Module.MODULES[m_name]
-        else:
-            return Module(m_name)
+    def __init__(self, project_path, package_name):
+        self.python_path = path.abspath(path.expanduser(project_path))
+        self.package_name = package_name
+        self.internal_packages = self.init_internal_package()
 
-    @staticmethod
-    def get_modules():
-        module = Module.MODULES
-        return module
-
-    def __init__(self, m_name):
-        Module.MODULES[m_name] = self
-        self.name = m_name
+        self.modules = defaultdict(set)
         self.files = set()
-        self.dependencies = set()
-        self.r_dependencies = set()
+        self.imports = defaultdict(set)
+
+        self.collect_module_data()
+
+    def init_internal_package(self):
+        python_path = self.python_path
+        package = {
+            x for x in os.listdir(python_path)
+            if path.isdir(path.join(python_path, x))
+               and path.exists(path.join(python_path, x, '__init__.py'))
+        }
+        return package
+
+    def collect_module_data(self):
+        python_path = self.python_path
+        for file in iter_py_files(path.join(python_path, self.package_name)):
+            self.add_module(file)
 
     def add_file(self, file):
-        self.files.add(file)
+        self.files.add(path.relpath(file, self.python_path))
 
-    def add_dependency(self, s, d):
-        self.add_file(s)
-        self.dependencies.add((s, d))
+    def module_to_filename(self, module: str, python_path: str):
+        module = module.replace('.', '/') + '.py'
+        return path.join(python_path, module)
+
+    def filename_to_module(self, filepath: str):
+        realpath = path.relpath(filepath, self.python_path)
+        realpath = realpath.replace('\\', '.')
+        realpath = realpath.replace('/', '.')
+        realpath = realpath.split('.py')[0]  # type: str
+        if realpath.endswith('.__init__'):
+            return realpath.split('.__init__')[0], realpath
+        return realpath, None
+
+    def add_module(self, file):
+        self.add_file(file)
+        module_desc = Module_Desc(file, self.python_path)
+        imports = self.get_imports(module_desc)
+        self.imports[module_desc.sub_module_name].update(imports)
+        module = self.get_module(module_desc)
+        module.add_imports(module_desc, imports)
+
+    def get_imports(self, module_desc):
+        file_imports = self.get_all_imports_of_file(module_desc)
+        internal_imports = {
+            x for x in file_imports
+            if [c for c in self.internal_packages if x.startswith(c)]
+        }
+        return internal_imports
+
+    def get_all_imports_of_file(self, module_desc):
+        python_path = self.python_path
+        filename = module_desc.abs_path
+        current_module = module_desc.sub_module_name
+        imports = set()
+        for node in ast.walk(parse_file(filename)):
+            if isinstance(node, ast.Import):
+                for name in node.names:
+                    # print(name.name)
+                    imports.add(name.name)
+            elif isinstance(node, ast.ImportFrom):
+                # find which module is imported from
+                # from .a import b # module=='a',name=='b'
+                # maybe base_module.a.b or Base_module.a#b
+                # from .a.b import c # module=='a.b',name=='c'
+                # maybe base_module.a.b.c or Base_module.a.b#c
+                # module should be
+                added = set()
+                if node.level == 0:
+                    module = node.module
+                else:
+                    module = '.'.join(current_module.split('.')[:-node.level])
+                    if node.module:
+                        module += '.' + node.module
+                    else:
+                        # from . import b # module==None,name=='b'
+                        # maybe base_module.b or Base_module#b
+                        pass
+                for name in node.names:
+                    maybe_dir = path.join(
+                        python_path,
+                        *module.split('.'),
+                        name.name,
+                    )
+                    maybe_file = self.module_to_filename(
+                        module + '.' + name.name, python_path
+                    )
+                    if file_exists(maybe_dir) or file_exists(maybe_file):
+                        added.add(module + '.' + name.name)
+                    else:
+                        added.add(module)
+                imports.update(added)
+        return imports
+
+    def get_module(self, module_desc):
+        m_name = module_desc.module_name
+        if m_name in self.modules:
+            return self.modules[m_name]
+        else:
+            module = Module(m_name)
+            self.modules[m_name] = module
+            return module
+
+    def get_modules(self):
+        return self.modules
+
+    def finalize(self):
+        for n, m in self.modules.items():
+            m.add_r_dependencies()
+        file_rankings = compute_file_rankings(self.modules)
+
+
+class Module(object):
+
+    def __init__(self, module_name):
+        self.name = module_name
+        self.files = set()
+        self.imports = []
+        self.r_dependencies = set()
+
+    def add_file(self, module_desc):
+        self.files.add(module_desc.abs_path)
+
+    def add_imports(self, module_desc, imports):
+        self.add_file(module_desc)
+        self.imports.append((module_desc, imports))
 
     def add_r_dependency(self, d):
         self.r_dependencies.add(d)
 
-    def add_r_dependencies(self):
-        python_path = Module.PYTHON_PATH
-        for s, d_name in self.dependencies:
-            if d_name not in Module.MODULES:
-                d_name = d_name[:d_name.rindex('.')]
-            s_name, init = filename_to_module(s, python_path)
-            if s_name not in Module.MODULES:
-                s_name = s_name[:s_name.rindex('.')]
-            if s_name != d_name:
-                Module.MODULES[d_name].add_r_dependency(s)
+# !@! TODO
+#     def add_r_dependencies(self):
+#         python_path = Module.PYTHON_PATH
+#         for s, d_name in self.dependencies:
+#             if d_name not in Module.MODULES:
+#                 d_name = d_name[:d_name.rindex('.')]
+#             s_name, init = filename_to_module(s, python_path)
+#             if s_name not in Module.MODULES:
+#                 s_name = s_name[:s_name.rindex('.')]
+#             if s_name != d_name:
+#                 Module.MODULES[d_name].add_r_dependency(s)
+
 
 # invoke: python3 gen_test_order.py ./ manimlib
 def main():
@@ -276,9 +296,9 @@ def main():
     parser.add_argument('package_name', )
     r = parser.parse_args()
 
-    Module.init(r.project_path, r.package_name)
-    Module.finalize()
-    modules = Module.get_modules()
+    package = Package(r.project_path, r.package_name)
+ #   Module.finalize()
+    modules = package.get_modules()
 
 
 main()
