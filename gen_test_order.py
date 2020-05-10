@@ -178,6 +178,56 @@ def compute_file_rankings(imports):
 
 class Module(object):
     MODULES = defaultdict(set)
+    FILES = set()
+    IMPORTS = defaultdict(set)
+
+    PYTHON_PATH = None
+    PACKAGE_NAME = None
+    INTERNAL_PACKAGE = None
+
+    @staticmethod
+    def init(project_path, package_name):
+        Module.PYTHON_PATH = path.abspath(path.expanduser(project_path))
+        Module.PACKAGE_NAME = package_name
+        Module.INTERNAL_PACKAGE = {
+            x for x in os.listdir(Module.PYTHON_PATH)
+            if path.isdir(path.join(Module.PYTHON_PATH, x))
+               and path.exists(path.join(Module.PYTHON_PATH, x, '__init__.py'))
+        }
+
+        python_path = Module.PYTHON_PATH
+        internal_package = Module.INTERNAL_PACKAGE
+        for file in iter_py_files(path.join(python_path, Module.PACKAGE_NAME)):
+            Module.FILES.add(path.relpath(file, python_path))
+            current_module, init = filename_to_module(file, python_path)
+
+            file_imports = get_all_imports_of_file(file, init, python_path=python_path)
+            internal_imports = {x for x in file_imports if [c for c in internal_package if x.startswith(c)]}
+            Module.IMPORTS[current_module].update(internal_imports)
+            Module.add_file_data(file, current_module, init, internal_imports)
+
+
+    @staticmethod
+    def finalize():
+        for n, m in Module.MODULES.items():
+            m.add_r_dependencies()
+        file_rankings = compute_file_rankings(Module.IMPORTS)
+
+    @staticmethod
+    def add_file_data(file, module, init, imports):
+        if init:
+            m =Module.get_module(module)
+            for i in imports:
+                m.add_dependency(module, i)
+        else:
+            m_name = module[:module.rindex('.')]
+            m = Module.get_module(m_name)
+            if imports:
+                for i in imports:
+                    m.add_dependency(file, i)
+            else:
+                m.add_file(file)
+
 
     @staticmethod
     def get_module(m_name):
@@ -188,7 +238,8 @@ class Module(object):
 
     @staticmethod
     def get_modules():
-        return Module.MODULES
+        module = Module.MODULES
+        return module
 
     def __init__(self, m_name):
         Module.MODULES[m_name] = self
@@ -207,7 +258,8 @@ class Module(object):
     def add_r_dependency(self, d):
         self.r_dependencies.add(d)
 
-    def add_r_dependencies(self, python_path):
+    def add_r_dependencies(self):
+        python_path = Module.PYTHON_PATH
         for s, d_name in self.dependencies:
             if d_name not in Module.MODULES:
                 d_name = d_name[:d_name.rindex('.')]
@@ -220,62 +272,13 @@ class Module(object):
 # invoke: python3 gen_test_order.py ./ manimlib
 def main():
     parser = argparse.ArgumentParser()
-    # parser.add_argument('-i', '--internal', action='store_true')
-    # parser.add_argument('-e', '--external', action='store_true')
-    parser.add_argument(
-        '-g',
-        '--group',
-        help='group module name',
-        type=argparse.FileType('r'),
-    )
     parser.add_argument('project_path', )
     parser.add_argument('package_name', )
-
     r = parser.parse_args()
 
-    if r.group:
-        groups = [line.strip() for line in r.group.readlines() if line.strip()]
-    else:
-        groups = []
-
-    def add_to_modules(file, module, init, imports):
-        if init:
-            m =Module.get_module(module)
-            for i in imports:
-                m.add_dependency(module, i)
-        else:
-            m_name = module[:module.rindex('.')]
-            m = Module.get_module(m_name)
-            if imports:
-                for i in imports:
-                    m.add_dependency(file, i)
-            else:
-                m.add_file(file)
-
-    python_path = path.abspath(path.expanduser(r.project_path))
-    internal_package = {
-        x for x in os.listdir(python_path)
-        if path.isdir(path.join(python_path, x))
-           and path.exists(path.join(python_path, x, '__init__.py'))
-    }
-
-    imports = defaultdict(set)
-
-    py_files = iter_py_files(path.join(python_path, r.package_name))
-    for file in py_files:
-        current_module, init = filename_to_module(file, python_path)
-
-        file_imports = get_all_imports_of_file(file, init, python_path=python_path)
-        internal_imports = {x for x in file_imports if [c for c in internal_package if x.startswith(c)]}
-        imports[current_module].update(internal_imports)
-        add_to_modules(file, current_module, init, internal_imports)
-
-    # print(graph(formatted_imports.items()))
+    Module.init(r.project_path, r.package_name)
+    Module.finalize()
     modules = Module.get_modules()
-    for n, m in modules.items():
-        m.add_r_dependencies(python_path)
-
-    file_rankings = compute_file_rankings(imports)
 
 
 main()
