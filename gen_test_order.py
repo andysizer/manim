@@ -33,8 +33,6 @@ def iter_py_files(dir_name):
     return files
 
 
-
-
 import argparse
 import os
 
@@ -118,6 +116,7 @@ def compute_file_rankings(imports):
             seen = seen.union(next_rank)
             rankings.append(next_rank)
     return rankings
+
 
 class Module_Desc(object):
 
@@ -271,6 +270,7 @@ class Package(object):
         def key_fn(x):
             (mn, m) = x
             return m.get_num_r_dependencies()
+
         rankings = sorted([(mn, m) for mn, m in self.modules.items()], key=key_fn, reverse=True)
         self.module_rankings = rankings
 
@@ -316,16 +316,30 @@ class Module(object):
 
     def rank_files(self):
 
-        def num_indirect_r_dependencies(r_dependencies):
-            total = sum(map(lambda m: self.package.get_module(m).get_num_r_dependencies(), r_dependencies))
+        def num_indirect_r_dependencies(module_desc, r_dependencies):
+            total = sum(map(lambda m: self.package.get_module(module_desc).get_num_r_dependencies(), r_dependencies))
             return total
 
         def key_fn(item):
-            (module_name, r_dependencies) = item
-            k = (len(r_dependencies) * self.package.get_num_r_dependencies()) + num_indirect_r_dependencies(r_dependencies)
+            (module_name, module_desc) = item
+            if module_name in self.r_dependencies:
+                k = (len(self.r_dependencies) * self.package.get_num_r_dependencies()) \
+                    + num_indirect_r_dependencies(module_desc, self.r_dependencies)
+                return k
+            else:
+                num_imports = 0
+                imports = next(
+                    (imports for (module_desc, imports) in self.imports if module_desc.sub_module_name == module_name),\
+                    None)
+                if imports:
+                    num_imports = len(imports)
+                k = ((self.get_num_r_dependencies() + 1) * self.package.get_num_r_dependencies()) + num_imports
             return k
 
-        self.file_ranking = sorted([ (m , d) for m ,d in self.r_dependencies.items() ], key=key_fn)
+        ranking = sorted([(module_name, module_desc) for module_name, module_desc in self.files.items()], key=key_fn)
+
+        self.file_ranking = [module_name for module_name, module_desc in ranking]
+
 
 
 # invoke: python3 gen_test_order.py ./ manimlib
