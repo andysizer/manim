@@ -1,8 +1,9 @@
 import ast
 import glob
-from collections import defaultdict
+from collections import defaultdict, deque
 from os import path
-from itertools import takewhile
+from itertools import takewhile, repeat
+from functools import reduce
 
 # from snakefood3.graph import graph
 
@@ -120,21 +121,21 @@ def compute_file_rankings(imports):
 
 class Module_Desc(object):
 
-    def __init__(self, filepath, python_path):
-        self.abs_path = filepath
+    def __init__(self, file_path, python_path):
+        self.abs_path = file_path
         self.python_path = python_path
-        self.rel_path = path.relpath(filepath, python_path)
+        self.rel_path = path.relpath(file_path, python_path)
 
-        tpath = path.relpath(filepath, python_path)
-        tpath1 = tpath.replace('\\', '.')
-        tpath2 = tpath1.replace('/', '.')
-        tpath3 = tpath2.split('.py')[0]  # type: str
-        self.sub_module_name = tpath3
-        if tpath3.endswith('.__init__'):
-            self.module_name = tpath3.split('.__init__')[0]
+        tpath = path.relpath(file_path, python_path). \
+            replace('\\', '.'). \
+            replace('/', '.'). \
+            split('.py')[0]  # type: str
+        self.sub_module_name = tpath
+        if tpath.endswith('.__init__'):
+            self.module_name = tpath.split('.__init__')[0]
             self.init = True
         else:
-            self.module_name = tpath3[:tpath3.rindex('.')]
+            self.module_name = tpath[:tpath.rindex('.')]
             self.init = False
 
 class Package(object):
@@ -149,6 +150,9 @@ class Package(object):
         self.imports = defaultdict(set)
 
         self.collect_module_data()
+        self.finalize()
+
+        self.num_r_dependencies = 0
 
     def init_internal_package(self):
         python_path = self.python_path
@@ -164,25 +168,16 @@ class Package(object):
         for file in iter_py_files(path.join(python_path, self.package_name)):
             self.add_module(file)
 
-    def add_file(self, file):
-        self.files.add(path.relpath(file, self.python_path))
+    def add_file(self, file_path):
+        self.files.add(path.relpath(file_path, self.python_path))
 
-    def module_to_filename(self, module: str, python_path: str):
-        module = module.replace('.', '/') + '.py'
-        return path.join(python_path, module)
+    def module_name_to_file_name(self, module_name: str):
+        module_name = module_name.replace('.', '/') + '.py'
+        return path.join(self.python_path, module_name)
 
-    def filename_to_module(self, filepath: str):
-        realpath = path.relpath(filepath, self.python_path)
-        realpath = realpath.replace('\\', '.')
-        realpath = realpath.replace('/', '.')
-        realpath = realpath.split('.py')[0]  # type: str
-        if realpath.endswith('.__init__'):
-            return realpath.split('.__init__')[0], realpath
-        return realpath, None
-
-    def add_module(self, file):
-        self.add_file(file)
-        module_desc = Module_Desc(file, self.python_path)
+    def add_module(self, file_path):
+        self.add_file(file_path)
+        module_desc = Module_Desc(file_path, self.python_path)
         imports = self.get_imports(module_desc)
         self.imports[module_desc.sub_module_name].update(imports)
         module = self.get_module(module_desc)
@@ -191,17 +186,17 @@ class Package(object):
     def get_imports(self, module_desc):
         file_imports = self.get_all_imports_of_file(module_desc)
         internal_imports = {
-            x for x in file_imports
+            Module_Desc(x, self.python_path) for x in file_imports
             if [c for c in self.internal_packages if x.startswith(c)]
         }
         return internal_imports
 
     def get_all_imports_of_file(self, module_desc):
         python_path = self.python_path
-        filename = module_desc.abs_path
-        current_module = module_desc.sub_module_name
+        abs_file_path = module_desc.abs_path
+        current_module_name = module_desc.sub_module_name
         imports = set()
-        for node in ast.walk(parse_file(filename)):
+        for node in ast.walk(parse_file(abs_file_path)):
             if isinstance(node, ast.Import):
                 for name in node.names:
                     # print(name.name)
@@ -217,7 +212,7 @@ class Package(object):
                 if node.level == 0:
                     module = node.module
                 else:
-                    module = '.'.join(current_module.split('.')[:-node.level])
+                    module = '.'.join(current_module_name.split('.')[:-node.level])
                     if node.module:
                         module += '.' + node.module
                     else:
@@ -230,11 +225,10 @@ class Package(object):
                         *module.split('.'),
                         name.name,
                     )
-                    maybe_file = self.module_to_filename(
-                        module + '.' + name.name, python_path
-                    )
+                    maybe_module_name = module + '.' + name.name
+                    maybe_file = self.module_name_to_file_name(maybe_module_name)
                     if file_exists(maybe_dir) or file_exists(maybe_file):
-                        added.add(module + '.' + name.name)
+                        added.add(maybe_module_name)
                     else:
                         added.add(module)
                 imports.update(added)
@@ -245,7 +239,7 @@ class Package(object):
         if m_name in self.modules:
             return self.modules[m_name]
         else:
-            module = Module(m_name)
+            module = Module(m_name, self)
             self.modules[m_name] = module
             return module
 
@@ -253,40 +247,71 @@ class Package(object):
         return self.modules
 
     def finalize(self):
+        self.add_r_dependencies()
+        for n, m in self.modules.items():
+            m.finalize()
+
+    def add_r_dependencies(self):
         for n, m in self.modules.items():
             m.add_r_dependencies()
-        file_rankings = compute_file_rankings(self.modules)
+
+        self.num_r_dependencies = sum([m.get_num_r_dependencies() for n, m in self.modules.items()])
+
+    def get_num_r_dependencies(self):
+        return self.num_r_dependencies
 
 
 class Module(object):
 
-    def __init__(self, module_name):
+    def __init__(self, module_name, package):
         self.name = module_name
-        self.files = set()
+        self.package = package
+        self.files = defaultdict(set)
         self.imports = []
-        self.r_dependencies = set()
+        self.r_dependencies = defaultdict(set)
+        self.num_r_dependencies = 0
+        self.file_ranking = []
 
     def add_file(self, module_desc):
-        self.files.add(module_desc.abs_path)
+        self.files[module_desc.sub_module_name] = module_desc
 
     def add_imports(self, module_desc, imports):
         self.add_file(module_desc)
         self.imports.append((module_desc, imports))
 
-    def add_r_dependency(self, d):
-        self.r_dependencies.add(d)
+    def add_r_dependency(self, t, f):
+        s = self.r_dependencies[t.sub_module_name]
+        s.add(f)
+        self.r_dependencies[t.sub_module_name].update(s)
+        self.num_r_dependencies = self.num_r_dependencies + 1
 
-# !@! TODO
-#     def add_r_dependencies(self):
-#         python_path = Module.PYTHON_PATH
-#         for s, d_name in self.dependencies:
-#             if d_name not in Module.MODULES:
-#                 d_name = d_name[:d_name.rindex('.')]
-#             s_name, init = filename_to_module(s, python_path)
-#             if s_name not in Module.MODULES:
-#                 s_name = s_name[:s_name.rindex('.')]
-#             if s_name != d_name:
-#                 Module.MODULES[d_name].add_r_dependency(s)
+    def add_r_dependencies(self):
+        for f, imps in self.imports:
+            for imp in imps:
+                module = self.package.get_module(imp)
+                # if self != module:
+                #     module.add_r_dependency(imp, f)
+                module.add_r_dependency(imp, f)
+
+    def get_num_r_dependencies(self):
+        return self.num_r_dependencies
+
+    def finalize(self):
+        if self.num_r_dependencies > 0:
+            self.rank_files()
+
+    def rank_files(self):
+
+        def num_indirect_r_dependencies(r_dependencies):
+            total = sum(map(lambda m: self.package.get_module(m).get_num_r_dependencies(), r_dependencies))
+            return total
+
+        def key_fn(item):
+            (module_name, r_dependencies) = item
+            k = (len(r_dependencies) * self.package.get_num_r_dependencies()) + num_indirect_r_dependencies(r_dependencies)
+            return k
+
+        self.file_ranking = sorted([ (m , d) for m ,d in self.r_dependencies.items() ], key=key_fn)
 
 
 # invoke: python3 gen_test_order.py ./ manimlib
@@ -297,7 +322,6 @@ def main():
     r = parser.parse_args()
 
     package = Package(r.project_path, r.package_name)
- #   Module.finalize()
     modules = package.get_modules()
 
 
