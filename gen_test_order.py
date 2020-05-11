@@ -126,6 +126,9 @@ class Module_Desc(object):
         self.python_path = python_path
         self.rel_path = path.relpath(file_path, python_path)
 
+        self.init_module_name(file_path, python_path)
+
+    def init_module_name(self, file_path, python_path):
         tpath = path.relpath(file_path, python_path). \
             replace('\\', '.'). \
             replace('/', '.'). \
@@ -137,6 +140,7 @@ class Module_Desc(object):
         else:
             self.module_name = tpath[:tpath.rindex('.')]
             self.init = False
+
 
 class Package(object):
 
@@ -153,6 +157,8 @@ class Package(object):
         self.finalize()
 
         self.num_r_dependencies = 0
+
+        self.module_rankings = []
 
     def init_internal_package(self):
         python_path = self.python_path
@@ -250,6 +256,7 @@ class Package(object):
         self.add_r_dependencies()
         for n, m in self.modules.items():
             m.finalize()
+        self.rank_modules()
 
     def add_r_dependencies(self):
         for n, m in self.modules.items():
@@ -259,6 +266,13 @@ class Package(object):
 
     def get_num_r_dependencies(self):
         return self.num_r_dependencies
+
+    def rank_modules(self):
+        def key_fn(x):
+            (mn, m) = x
+            return m.get_num_r_dependencies()
+        rankings = sorted([(mn, m) for mn, m in self.modules.items()], key=key_fn, reverse=True)
+        self.module_rankings = rankings
 
 
 class Module(object):
