@@ -66,10 +66,13 @@ Package: {{package.package_name}}
 
 Modules:
 {%- for module_ranking in package.get_module_rankings() %}
-  {{"%2s." | format(loop.index)}} '{{module_ranking.get_name()}}' (#rd={{module_ranking.get_num_r_dependencies()}} w={{module_ranking.get_weight()}})
+  {{"%2s." | format(loop.index)}} '{{module_ranking.get_name()}}' \
+(#rd={{module_ranking.get_num_r_dependencies()}} w={{module_ranking.get_weight()}})
       Files:
       {%- for file_ranking in module_ranking.get_file_rankings() %}
-      {{"%2s." | format(loop.index)}} '{{file_ranking.get_module_name()}}' (k={{file_ranking.get_key()}} #i={{file_ranking.get_num_imports()}} #rd={{file_ranking.get_num_r_dependencies()}})
+      {{"%2s." | format(loop.index)}} '{{file_ranking.get_module_name()}}' \
+(k={{file_ranking.get_key()}} #i={{file_ranking.get_num_imports()}} #rd={{file_ranking.get_num_r_dependencies()}} \
+#ird={{file_ranking.num_indirect_r_dependencies()}})
       {%- endfor %}
 {%- endfor %}
 
@@ -245,6 +248,7 @@ class Module(object):
         self.package = package
         self.files = defaultdict(set)
         self.imports = []
+        self.num_imports = 0
         self.r_dependencies = defaultdict(set)
         self.num_r_dependencies = 0
         self.file_rankings = []
@@ -270,6 +274,10 @@ class Module(object):
     def add_imports(self, module_desc, imports):
         self.add_file(module_desc)
         self.imports.append((module_desc, imports))
+        self.num_imports = self.num_imports + len(imports)
+
+    def get_num_imports(self):
+        return self.num_imports
 
     def add_r_dependency(self, t, f):
         s = self.r_dependencies[t.sub_module_name]
@@ -286,12 +294,11 @@ class Module(object):
                 module.add_r_dependency(imp, f)
 
     def finalize(self):
-        if self.num_r_dependencies > 0:
-            self.rank_files()
+        self.rank_files()
 
     def rank_files(self):
         file_rankings = [
-            FileRanking(module_desc, self.package, self.imports, self.r_dependencies, self.num_r_dependencies)
+            FileRanking(self, module_desc, self.package, self.imports, self.r_dependencies, self.num_r_dependencies)
             for module_name, module_desc in self.files.items()
         ]
         file_rankings.sort(key=lambda r: r.get_key(), reverse=True)
@@ -320,7 +327,8 @@ class Module(object):
 
 class FileRanking(object):
 
-    def __init__(self, module_desc, package, imports, r_dependencies, module_r_dependencies):
+    def __init__(self, module, module_desc, package, imports, r_dependencies, module_r_dependencies):
+        self.module = module
         self.module_desc = module_desc
         self.module_name = module_desc.sub_module_name
         self.package = package
@@ -347,18 +355,18 @@ class FileRanking(object):
             return set()
 
     def compute_key(self):
-        module_name = self.module_name
-        module_desc = self.module_desc
+        k0 = self.module.get_num_imports() - self.num_imports
+        k1 = k0 * self.package.get_num_r_dependencies()
+        k2 = k1
         if self.num_r_dependencies > 0:
-            k = (self.num_r_dependencies * self.package.get_num_r_dependencies()) \
-                + self.num_indirect_r_dependencies()
-        else:
-            k = ((self.module_r_dependencies + 1) * self.package.get_num_r_dependencies()) + self.num_imports
-        return k / 1 + self.get_num_imports()
+            k2 += self.num_r_dependencies + self.num_indirect_r_dependencies()
+        return k2
 
     def num_indirect_r_dependencies(self):
-        def get_num_indirect_r_dependencies(m):
-            return self.package.get_module(self.module_desc).get_num_r_dependencies()
+
+        def get_num_indirect_r_dependencies(module_desc):
+            module = self.package.get_module(module_desc)
+            return len(module.get_r_dependencies()[module_desc.sub_module_name])
 
         total = sum(map(get_num_indirect_r_dependencies, self.r_dependencies))
         return total
