@@ -4,33 +4,24 @@ import ast
 import glob
 from collections import defaultdict
 from os import path
-from itertools import takewhile
 import jinja2
 
-cached_exists_files = {}
+# set True for profiling
+PROFILING=False
+PROFILER=None
 
 
-def file_exists(filename):
-    if filename in cached_exists_files:
-        return cached_exists_files[filename]
-    else:
-        status = path.exists(filename)
-        cached_exists_files[filename] = status
-        return status
+def start_profiler():
+    if PROFILING:
+        import cProfile
+        PROFILER = cProfile.Profile()
+        PROFILER.enable()
 
 
-def parse_file(filename) -> ast.AST:
-    with open(filename, 'r', encoding='utf8') as f:
-        return ast.parse(f.read(), filename)
-
-
-def iter_py_files(dir_name):
-    # snakefood3 originally had the following. Not sure why, as it doesn't find (and therefore analyze)
-    # all submodules/files.
-    # files =  glob.glob(path.join(dir_name, '**', '*.py')) +\
-    #        glob.glob(path.join(dir_name, '*.py'))
-    files = glob.glob(path.join(dir_name, '**', '*.py'), recursive=True)
-    return files
+def stop_profiler():
+    if PROFILING:
+        PROFILER.disable()
+        PROFILER.print_stats(sort="tottime")
 
 
 class ModuleDesc(object):
@@ -41,21 +32,16 @@ class ModuleDesc(object):
         self.rel_path = path.relpath(file_path, python_path)
         self.module_name = ""
         self.sub_module_name = ""
-        self.init = False
 
         self.init_module_name(file_path, python_path)
 
     def init_module_name(self, file_path, python_path):
-        temp_path = path.relpath(file_path, python_path). \
-            replace('\\', '.'). \
-            replace('/', '.'). \
-            split('.py')[0]  # type: str
+        # drop the .py extension
+        base_path = file_path.split('.py')[0]
+        # replace dir separators by '.'
+        temp_path = path.relpath(base_path, python_path).replace('\\', '.').replace('/', '.')
         self.sub_module_name = temp_path
-        if temp_path.endswith('.__init__'):
-            self.module_name = temp_path.split('.__init__')[0]
-            self.init = True
-        else:
-            self.module_name = temp_path[:temp_path.rindex('.')]
+        self.module_name = temp_path[:temp_path.rindex('.')]
 
 
 template = jinja2.Template(
@@ -88,7 +74,9 @@ class Package(object):
         self.package_name = package_name
         self.internal_packages = self.init_internal_package()
 
-        self.modules = defaultdict(set)
+        self.file_exists_cache = {}
+
+        self.modules = dict()
         self.files = set()
         self.imports = defaultdict(set)
         self.num_r_dependencies = 0
@@ -101,14 +89,29 @@ class Package(object):
         python_path = self.python_path
         package = {
             x for x in os.listdir(python_path)
-            if path.isdir(path.join(python_path, x))
-               and path.exists(path.join(python_path, x, '__init__.py'))
+            if path.isdir(path.join(python_path, x)) and path.exists(path.join(python_path, x, '__init__.py'))
         }
         return package
 
+    def file_exists(self, file_path):
+        if file_path in self.file_exists_cache:
+            return self.file_exists_cache[file_path]
+        else:
+            status = path.exists(file_path)
+            self.file_exists_cache[file_path] = status
+            return status
+
+    def parse_file(self, file_path) -> ast.AST:
+        with open(file_path, 'r', encoding='utf8') as f:
+            return ast.parse(f.read(), file_path)
+
+    def iter_py_files(self, dir_name):
+        files = glob.glob(path.join(dir_name, '**', '*.py'), recursive=True)
+        return files
+
     def collect_module_data(self):
         python_path = self.python_path
-        for file in iter_py_files(path.join(python_path, self.package_name)):
+        for file in self.iter_py_files(path.join(python_path, self.package_name)):
             self.add_module(file)
 
     def add_file(self, file_path):
@@ -139,7 +142,7 @@ class Package(object):
         abs_file_path = module_desc.abs_path
         current_module_name = module_desc.sub_module_name
         imports = set()
-        for node in ast.walk(parse_file(abs_file_path)):
+        for node in ast.walk(self.parse_file(abs_file_path)):
             if isinstance(node, ast.Import):
                 for name in node.names:
                     # print(name.name)
@@ -170,7 +173,7 @@ class Package(object):
                     )
                     maybe_module_name = module + '.' + name.name
                     maybe_file = self.module_name_to_file_name(maybe_module_name)
-                    if file_exists(maybe_dir) or file_exists(maybe_file):
+                    if self.file_exists(maybe_dir) or self.file_exists(maybe_file):
                         added.add(maybe_module_name)
                     else:
                         added.add(module)
@@ -314,13 +317,14 @@ class Module(object):
         if '.' in my_name:
             ancestor_name = my_name[:my_name.rindex('.')]
 
-            def get_ancestor_from_r_dependencies(ancestor_name):
+            def get_ancestor_from_r_dependencies(a_name):
                 def find_module(name):
                     for module_name, r_dependencies in self.get_r_dependencies().items():
                         for module_desc in r_dependencies:
                             if name == self.get_package().get_module(module_desc).get_name():
                                 yield self.get_package().get_module(module_desc)
-                return next(find_module(ancestor_name), None)
+
+                return next(find_module(a_name), None)
 
             ancestor = get_ancestor_from_r_dependencies(ancestor_name)
             if ancestor:
@@ -345,10 +349,12 @@ class FileRanking(object):
         self.key = self.compute_key()
 
     def get_imports(self, module_imports):
+
         def find_imports():
             for (module_desc, imports) in module_imports:
                 if module_desc.sub_module_name == self.module_name:
                     yield imports
+
         return next(find_imports(), set())
 
     def get_r_dependencies(self, r_dependencies):
@@ -394,7 +400,12 @@ def main():
     parser.add_argument('package_name', )
     r = parser.parse_args()
 
+    start_profiler()
+
     package = Package(r.project_path, r.package_name)
+
+    stop_profiler()
+
     report = package.report()
     print(report)
 
