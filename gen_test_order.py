@@ -251,6 +251,8 @@ class Module(object):
         self.num_imports = 0
         self.r_dependencies = defaultdict(set)
         self.num_r_dependencies = 0
+        self.weight = 0
+        self.weight_computed = False
         self.file_rankings = []
 
     def get_name(self):
@@ -305,24 +307,27 @@ class Module(object):
         self.file_rankings = file_rankings
 
     def compute_weight(self):
+        if self.weight_computed:
+            return self.weight
+
         my_name = self.get_name()
         if '.' in my_name:
             ancestor_name = my_name[:my_name.rindex('.')]
 
             def get_ancestor_from_r_dependencies(ancestor_name):
-                return next((
-                    self.get_package().get_module(module_desc)
-                    for module_name, r_dependencies in self.get_r_dependencies().items()
-                    for module_desc in r_dependencies
-                    if ancestor_name == self.get_package().get_module(module_desc).get_name()
-                ),
-                    None
-                )
+                def find_module(name):
+                    for module_name, r_dependencies in self.get_r_dependencies().items():
+                        for module_desc in r_dependencies:
+                            if name == self.get_package().get_module(module_desc).get_name():
+                                yield self.get_package().get_module(module_desc)
+                return next(find_module(ancestor_name), None)
 
             ancestor = get_ancestor_from_r_dependencies(ancestor_name)
             if ancestor:
-                return ancestor.get_num_r_dependencies() + ancestor.compute_weight()
-        return 0
+                self.weight = ancestor.get_num_r_dependencies() + ancestor.compute_weight()
+
+        self.weight_computed = True
+        return self.weight
 
 
 class FileRanking(object):
@@ -340,13 +345,11 @@ class FileRanking(object):
         self.key = self.compute_key()
 
     def get_imports(self, module_imports):
-        my_imports = next(
-            (imports for (module_desc, imports) in module_imports if module_desc.sub_module_name == self.module_name),
-            None)
-        if my_imports:
-            return my_imports
-        else:
-            return set()
+        def find_imports():
+            for (module_desc, imports) in module_imports:
+                if module_desc.sub_module_name == self.module_name:
+                    yield imports
+        return next(find_imports(), set())
 
     def get_r_dependencies(self, r_dependencies):
         if self.module_name in r_dependencies:
